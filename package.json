@@ -1,0 +1,14 @@
+{
+    "name": "whatsapp-otp-microservice",
+    "version": "1.0.0",
+    "description": "Node.js microservice to handle WhatsApp Web interactions for OTPFlow",
+    "main": "server.js",
+    "scripts": {
+        "start": "node server.js"
+    },
+    "dependencies": {
+        "express": "^4.18.2",
+        "whatsapp-web.js": "^1.23.0",
+        "qrcode": "^1.5.3"
+    }
+}
