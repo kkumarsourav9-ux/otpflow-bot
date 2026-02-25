@@ -33,8 +33,12 @@ app.post('/init/:instanceId', async (req, res) => {
         const { instanceId } = req.params;
         const session = await startSession(instanceId);
 
-        // Wait briefly for QR to generate
-        await new Promise(r => setTimeout(r, 3000));
+        // Wait for QR to generate (Baileys can take up to 10s)
+        for (let i = 0; i < 10; i++) {
+            await new Promise(r => setTimeout(r, 1000));
+            const s = getSession(instanceId);
+            if (s?.qr || s?.status === 'connected') break;
+        }
 
         const currentSession = getSession(instanceId);
         if (currentSession?.qr) {
@@ -67,7 +71,11 @@ app.get('/qr/:instanceId', async (req, res) => {
         if (!session) {
             // Try to start the session if not running
             await startSession(instanceId);
-            await new Promise(r => setTimeout(r, 3000));
+            for (let i = 0; i < 8; i++) {
+                await new Promise(r => setTimeout(r, 1000));
+                const s = getSession(instanceId);
+                if (s?.qr || s?.status === 'connected') break;
+            }
             const newSession = getSession(instanceId);
 
             if (newSession?.qr) {
@@ -218,7 +226,11 @@ app.post('/create-instance', async (req, res) => {
 
         // Start WhatsApp session to generate QR
         await startSession(instanceId);
-        await new Promise(r => setTimeout(r, 3000));
+        for (let i = 0; i < 10; i++) {
+            await new Promise(r => setTimeout(r, 1000));
+            const s = getSession(instanceId);
+            if (s?.qr || s?.status === 'connected') break;
+        }
 
         const session = getSession(instanceId);
         let qrDataUrl = null;
