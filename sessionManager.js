@@ -7,7 +7,7 @@ const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion } = r
 const pino = require('pino');
 const { useDBAuthState, updateInstanceStatus, markBanned } = require('./dbStore');
 
-const logger = pino({ level: process.env.LOG_LEVEL || 'silent' });
+const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
 
 // Active socket connections: instanceId -> { socket, qr, status }
 const sessions = new Map();
@@ -31,11 +31,13 @@ async function startSession(instanceId) {
         const { state, saveCreds } = await useDBAuthState(instanceId);
         const { version } = await fetchLatestBaileysVersion();
 
+        console.log(`[${instanceId}] Starting session with Baileys v${version.join('.')}...`);
+
         const socket = makeWASocket({
             version,
             auth: state,
             logger,
-            printQRInTerminal: false,
+            printQRInTerminal: true,
             browser: ['OTPFlow', 'Chrome', '120.0'],
             connectTimeoutMs: 60000,
             markOnlineOnConnect: false,

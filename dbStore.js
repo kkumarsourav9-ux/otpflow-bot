@@ -1,9 +1,11 @@
 /**
  * dbStore.js — MySQL-backed auth state store for Baileys
- * Replaces file-based useMultiFileAuthState so sessions persist across Render spin-downs
+ * Stores session credentials in the database so WhatsApp sessions survive Render spin-downs
  */
 
 const mysql = require('mysql2/promise');
+const { proto } = require('@whiskeysockets/baileys');
+const { initAuthCreds, BufferJSON } = require('@whiskeysockets/baileys');
 
 let pool = null;
 
@@ -23,13 +25,13 @@ function getPool() {
 }
 
 /**
- * Save auth credentials to the database
+ * Save auth credentials to the database (with Buffer-safe JSON)
  */
 async function saveCreds(instanceId, creds) {
     const db = getPool();
     await db.execute(
         'UPDATE whatsapp_instances SET auth_creds = ? WHERE instance_id = ?',
-        [JSON.stringify(creds), instanceId]
+        [JSON.stringify(creds, BufferJSON.replacer), instanceId]
     );
 }
 
@@ -43,21 +45,26 @@ async function loadCreds(instanceId) {
         [instanceId]
     );
     if (rows.length && rows[0].auth_creds) {
-        return typeof rows[0].auth_creds === 'string'
-            ? JSON.parse(rows[0].auth_creds)
-            : rows[0].auth_creds;
+        try {
+            const raw = typeof rows[0].auth_creds === 'string'
+                ? rows[0].auth_creds
+                : JSON.stringify(rows[0].auth_creds);
+            return JSON.parse(raw, BufferJSON.reviver);
+        } catch (e) {
+            return null;
+        }
     }
     return null;
 }
 
 /**
- * Save auth keys to the database
+ * Save auth keys to the database (with Buffer-safe JSON)
  */
 async function saveKeys(instanceId, keys) {
     const db = getPool();
     await db.execute(
         'UPDATE whatsapp_instances SET auth_keys = ? WHERE instance_id = ?',
-        [JSON.stringify(keys), instanceId]
+        [JSON.stringify(keys, BufferJSON.replacer), instanceId]
     );
 }
 
@@ -71,43 +78,55 @@ async function loadKeys(instanceId) {
         [instanceId]
     );
     if (rows.length && rows[0].auth_keys) {
-        return typeof rows[0].auth_keys === 'string'
-            ? JSON.parse(rows[0].auth_keys)
-            : rows[0].auth_keys;
+        try {
+            const raw = typeof rows[0].auth_keys === 'string'
+                ? rows[0].auth_keys
+                : JSON.stringify(rows[0].auth_keys);
+            return JSON.parse(raw, BufferJSON.reviver);
+        } catch (e) {
+            return null;
+        }
     }
     return null;
 }
 
 /**
  * Create a Baileys-compatible auth state backed by MySQL
+ * Uses initAuthCreds() for proper initial WhatsApp credentials
  */
 async function useDBAuthState(instanceId) {
-    const creds = (await loadCreds(instanceId)) || {};
-    const keys = (await loadKeys(instanceId)) || {};
+    // CRITICAL: Use initAuthCreds() for new sessions — empty {} won't work
+    let creds = (await loadCreds(instanceId)) || initAuthCreds();
+    const storedKeys = (await loadKeys(instanceId)) || {};
 
-    return {
-        state: {
-            creds,
-            keys: {
-                get: (type, ids) => {
-                    const data = {};
-                    for (const id of ids) {
-                        const key = `${type}-${id}`;
-                        if (keys[key]) data[id] = keys[key];
-                    }
-                    return data;
-                },
-                set: async (data) => {
-                    for (const category in data) {
-                        for (const id in data[category]) {
-                            const key = `${category}-${id}`;
-                            keys[key] = data[category][id];
-                        }
-                    }
-                    await saveKeys(instanceId, keys);
+    const keys = {
+        get: (type, ids) => {
+            const data = {};
+            for (const id of ids) {
+                const key = `${type}-${id}`;
+                if (storedKeys[key]) {
+                    data[id] = storedKeys[key];
                 }
             }
+            return data;
         },
+        set: async (data) => {
+            for (const category in data) {
+                for (const id in data[category]) {
+                    const key = `${category}-${id}`;
+                    if (data[category][id]) {
+                        storedKeys[key] = data[category][id];
+                    } else {
+                        delete storedKeys[key];
+                    }
+                }
+            }
+            await saveKeys(instanceId, storedKeys);
+        }
+    };
+
+    return {
+        state: { creds, keys },
         saveCreds: async () => {
             await saveCreds(instanceId, creds);
         }
@@ -152,7 +171,6 @@ async function incrementMessageCount(instanceId) {
     const db = getPool();
     const today = new Date().toISOString().split('T')[0];
 
-    // Reset counter if it's a new day
     await db.execute(
         `UPDATE whatsapp_instances 
          SET messages_sent_today = CASE 
@@ -183,7 +201,6 @@ async function getAvailableInstances(userId) {
         [userId]
     );
 
-    // Reset counts for new day and filter by capacity
     return rows.map(row => {
         const effectiveCount = (row.last_reset_date && row.last_reset_date >= today)
             ? row.messages_sent_today
