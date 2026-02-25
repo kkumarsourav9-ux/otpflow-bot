@@ -1,6 +1,7 @@
 const express = require('express');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
+const puppeteer = require('puppeteer');
 
 const app = express();
 app.use(express.json());
@@ -14,6 +15,7 @@ let isReady = false;
 const client = new Client({
     authStrategy: new LocalAuth({ clientId: "default_shared" }),
     puppeteer: {
+        executablePath: puppeteer.executablePath(),
         args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
 });
