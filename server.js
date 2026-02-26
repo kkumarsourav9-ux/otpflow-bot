@@ -11,6 +11,14 @@ const pino = require('pino');
 
 const app = express();
 app.use(express.json());
+// CORS — allow browser requests from InfinityFree website
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+    next();
+});
 const PORT = process.env.PORT || 3000;
 const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
 
