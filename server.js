@@ -41,6 +41,29 @@ function getPool() {
     return pool;
 }
 
+// Auto-create whatsapp_instances table on Aiven if missing
+async function initDatabase() {
+    const db = getPool();
+    await db.execute(`CREATE TABLE IF NOT EXISTS whatsapp_instances (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        instance_id VARCHAR(255) NOT NULL UNIQUE,
+        phone_number VARCHAR(50) DEFAULT NULL,
+        status ENUM('disconnected','connecting','connected','reconnecting','banned') DEFAULT 'disconnected',
+        is_banned TINYINT(1) DEFAULT 0,
+        is_company_shared TINYINT(1) DEFAULT 0,
+        daily_message_limit INT DEFAULT 50,
+        messages_sent_today INT DEFAULT 0,
+        last_reset_date DATE DEFAULT NULL,
+        priority INT DEFAULT 1,
+        auth_creds JSON DEFAULT NULL,
+        auth_keys JSON DEFAULT NULL,
+        last_ping TIMESTAMP NULL DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`);
+    console.log('[DB] whatsapp_instances table ready');
+}
+
 // ═══════════════════════════════════════════════
 //  AUTH STATE (MySQL-backed)
 // ═══════════════════════════════════════════════
@@ -492,6 +515,9 @@ async function main() {
     initAuthCreds = baileys.initAuthCreds;
     BufferJSON = baileys.BufferJSON;
     console.log('Baileys loaded successfully!');
+
+    // Create tables on Aiven if they don't exist
+    await initDatabase();
 
     // Restore previously connected sessions
     try {
