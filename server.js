@@ -278,7 +278,7 @@ function getAllSessions() {
 }
 
 // Wait for QR with polling
-async function waitForQr(instanceId, maxSeconds = 10) {
+async function waitForQr(instanceId, maxSeconds = 15) {
     for (let i = 0; i < maxSeconds; i++) {
         await new Promise(r => setTimeout(r, 1000));
         const s = getSession(instanceId);
