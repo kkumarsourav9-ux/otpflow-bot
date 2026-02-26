@@ -27,13 +27,15 @@ let pool = null;
 function getPool() {
     if (!pool) {
         pool = mysql.createPool({
-            host: process.env.DB_HOST || 'localhost',
-            user: process.env.DB_USER || 'root',
-            password: process.env.DB_PASS || '',
-            database: process.env.DB_NAME || 'whatsapp_otp_saas',
+            host: process.env.DB_HOST || 'mysql-f908901-kkumarsourav9-3509.i.aivencloud.com',
+            port: parseInt(process.env.DB_PORT || '20360'),
+            user: process.env.DB_USER || 'avnadmin',
+            password: process.env.DB_PASS || 'AVNS_yeQwbjwhAVWpr04KALJ',
+            database: process.env.DB_NAME || 'defaultdb',
             waitForConnections: true,
             connectionLimit: 10,
-            charset: 'utf8mb4'
+            charset: 'utf8mb4',
+            ssl: { rejectUnauthorized: false }
         });
     }
     return pool;
