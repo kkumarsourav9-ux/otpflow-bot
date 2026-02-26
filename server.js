@@ -166,10 +166,18 @@ async function createInstanceRecord(userId, instanceId) {
 async function startSession(instanceId) {
     if (sessions.has(instanceId)) {
         const existing = sessions.get(instanceId);
-        if (existing.status === 'connected' || existing.status === 'connecting') return existing;
+        if (existing.status === 'connected') return existing;
+        // If stuck in 'connecting' for over 45 seconds, force restart
+        if (existing.status === 'connecting' || existing.status === 'qr_ready') {
+            const age = Date.now() - (existing.createdAt || 0);
+            if (age < 45000) return existing; // Still fresh, don't restart
+            console.log(`[${instanceId}] Session stuck for ${Math.round(age / 1000)}s, restarting...`);
+            try { existing.socket?.end(); } catch (e) { }
+            sessions.delete(instanceId);
+        }
     }
 
-    const session = { socket: null, qr: null, status: 'connecting', phoneNumber: null };
+    const session = { socket: null, qr: null, status: 'connecting', phoneNumber: null, createdAt: Date.now() };
     sessions.set(instanceId, session);
 
     try {
@@ -348,17 +356,47 @@ app.get('/qr/:instanceId', async (req, res) => {
     try {
         const { instanceId } = req.params;
         let s = getSession(instanceId);
+
         if (!s) {
+            // No session at all — start fresh
             await startSession(instanceId);
-            s = await waitForQr(instanceId, 8);
+            s = await waitForQr(instanceId, 12);
+        } else if (s.status === 'connecting' && !s.qr) {
+            // Session exists but no QR yet — wait a bit
+            s = await waitForQr(instanceId, 5);
+        } else if (s.status === 'error' || s.status === 'disconnected') {
+            // Dead session — restart
+            try { s.socket?.end(); } catch (e) { }
+            sessions.delete(instanceId);
+            await startSession(instanceId);
+            s = await waitForQr(instanceId, 12);
         }
+
+        // Check for stale connecting (>60s without QR)
+        if (s && s.status === 'connecting' && !s.qr) {
+            const age = Date.now() - (s.createdAt || 0);
+            if (age > 60000) {
+                console.log(`[${instanceId}] Stale session detected (${Math.round(age / 1000)}s), forcing restart`);
+                try { s.socket?.end(); } catch (e) { }
+                sessions.delete(instanceId);
+                await startSession(instanceId);
+                s = await waitForQr(instanceId, 12);
+            }
+        }
+
         if (s?.status === 'connected') return res.json({ status: 'connected', phoneNumber: s.phoneNumber });
         if (s?.qr) {
             const qr = await QRCode.toDataURL(s.qr);
             return res.json({ status: 'qr_ready', qr });
         }
-        res.json({ status: s?.status || 'connecting' });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+
+        // Return detailed status
+        const age = s ? Math.round((Date.now() - (s.createdAt || Date.now())) / 1000) : 0;
+        res.json({ status: s?.status || 'connecting', age_seconds: age });
+    } catch (err) {
+        console.error(`[/qr] Error:`, err.message);
+        res.status(500).json({ status: 'error', error: err.message });
+    }
 });
 
 app.get('/status/:instanceId', (req, res) => {
@@ -407,11 +445,37 @@ app.post('/create-instance', async (req, res) => {
         const instanceId = `wa_${user_id}_${Date.now()}`;
         await createInstanceRecord(user_id, instanceId);
         await startSession(instanceId);
-        const s = await waitForQr(instanceId);
+        const s = await waitForQr(instanceId, 20);
         let qr = null;
         if (s?.qr) qr = await QRCode.toDataURL(s.qr);
         res.json({ success: true, instance_id: instanceId, status: s?.status || 'connecting', qr });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+        console.error(`[create-instance] Error:`, err.message);
+        res.status(500).json({ status: 'error', error: err.message });
+    }
+});
+
+// Force restart a stuck instance
+app.post('/restart/:instanceId', async (req, res) => {
+    try {
+        const { instanceId } = req.params;
+        const existing = sessions.get(instanceId);
+        if (existing?.socket) {
+            try { existing.socket.end(); } catch (e) { }
+        }
+        sessions.delete(instanceId);
+        // Clear auth data to force fresh QR
+        const db = getPool();
+        await db.execute('UPDATE whatsapp_instances SET auth_creds = NULL, auth_keys = NULL, status = ? WHERE instance_id = ?', ['disconnected', instanceId]);
+        await startSession(instanceId);
+        const s = await waitForQr(instanceId, 20);
+        let qr = null;
+        if (s?.qr) qr = await QRCode.toDataURL(s.qr);
+        res.json({ success: true, instance_id: instanceId, status: s?.status || 'connecting', qr });
+    } catch (err) {
+        console.error(`[restart] Error:`, err.message);
+        res.status(500).json({ status: 'error', error: err.message });
+    }
 });
 
 // ═══════════════════════════════════════════════
