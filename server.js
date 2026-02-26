@@ -463,6 +463,26 @@ app.get('/instances/:userId', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Delete / remove an instance
+app.delete('/instance/:instanceId', async (req, res) => {
+    try {
+        const { instanceId } = req.params;
+        // Close socket if active
+        const s = sessions.get(instanceId);
+        if (s?.socket) {
+            try { s.socket.end(); } catch (e) { }
+        }
+        sessions.delete(instanceId);
+        // Remove from DB
+        const db = getPool();
+        await db.execute('DELETE FROM whatsapp_instances WHERE instance_id = ?', [instanceId]);
+        res.json({ success: true, message: 'Instance removed' });
+    } catch (err) {
+        console.error(`[delete] Error:`, err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.post('/create-instance', async (req, res) => {
     try {
         const { user_id } = req.body;
