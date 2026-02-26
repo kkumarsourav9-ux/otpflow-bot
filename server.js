@@ -51,7 +51,7 @@ async function useDBAuthState(instanceId) {
     if (credRows.length && credRows[0].auth_creds) {
         try {
             const raw = typeof credRows[0].auth_creds === 'string' ? credRows[0].auth_creds : JSON.stringify(credRows[0].auth_creds);
-            creds = JSON.parse(raw, BufferJSON.replacer ? undefined : undefined);
+            creds = JSON.parse(raw);
         } catch (e) { creds = null; }
     }
     if (!creds) creds = initAuthCreds();

@@ -2,10 +2,10 @@
     "name": "otpflow-whatsapp-service",
     "version": "1.0.0",
     "description": "Multi-WhatsApp auto-rotation service using Baileys",
-    "main": "index.js",
+    "main": "server.js",
     "scripts": {
-        "start": "node index.js",
-        "dev": "node --watch index.js"
+        "start": "node server.js",
+        "dev": "node --watch server.js"
     },
     "dependencies": {
         "@whiskeysockets/baileys": "^6.7.16",
