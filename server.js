@@ -84,7 +84,7 @@ async function useDBAuthState(instanceId) {
     if (credRows.length && credRows[0].auth_creds) {
         try {
             const raw = typeof credRows[0].auth_creds === 'string' ? credRows[0].auth_creds : JSON.stringify(credRows[0].auth_creds);
-            creds = JSON.parse(raw);
+            creds = JSON.parse(raw, BufferJSON.reviver);
         } catch (e) { creds = null; }
     }
     if (!creds) creds = initAuthCreds();
@@ -95,7 +95,7 @@ async function useDBAuthState(instanceId) {
     if (keyRows.length && keyRows[0].auth_keys) {
         try {
             const raw = typeof keyRows[0].auth_keys === 'string' ? keyRows[0].auth_keys : JSON.stringify(keyRows[0].auth_keys);
-            storedKeys = JSON.parse(raw);
+            storedKeys = JSON.parse(raw, BufferJSON.reviver);
         } catch (e) { storedKeys = {}; }
     }
 
@@ -116,14 +116,14 @@ async function useDBAuthState(instanceId) {
                     else delete storedKeys[k];
                 }
             }
-            await db.execute('UPDATE whatsapp_instances SET auth_keys = ? WHERE instance_id = ?', [JSON.stringify(storedKeys), instanceId]);
+            await db.execute('UPDATE whatsapp_instances SET auth_keys = ? WHERE instance_id = ?', [JSON.stringify(storedKeys, BufferJSON.replacer), instanceId]);
         }
     };
 
     return {
         state: { creds, keys },
         saveCreds: async () => {
-            await db.execute('UPDATE whatsapp_instances SET auth_creds = ? WHERE instance_id = ?', [JSON.stringify(creds), instanceId]);
+            await db.execute('UPDATE whatsapp_instances SET auth_creds = ? WHERE instance_id = ?', [JSON.stringify(creds, BufferJSON.replacer), instanceId]);
         }
     };
 }
