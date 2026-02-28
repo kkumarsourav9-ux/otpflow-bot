@@ -28,6 +28,10 @@ let makeWASocket, DisconnectReason, fetchLatestBaileysVersion, initAuthCreds, Bu
 // Active sessions: instanceId -> { socket, qr, status, phoneNumber }
 const sessions = new Map();
 
+// Round-Robin Trackers
+const personalRoundRobinIndex = new Map(); // userId -> currentIndex
+let sharedRoundRobinIndex = 0;
+
 // ═══════════════════════════════════════════════
 //  DATABASE
 // ═══════════════════════════════════════════════
@@ -329,42 +333,84 @@ async function waitForQr(instanceId, maxSeconds = 15) {
 }
 
 // ═══════════════════════════════════════════════
-//  ROTATION ENGINE
+//  ROTATION ENGINE (Sequential Round-Robin)
 // ═══════════════════════════════════════════════
 async function sendWithRotation(userId, phone, message) {
     const instances = await getAvailableInstances(userId);
-    if (!instances.length) return { success: false, error: 'All instances at limit/banned/disconnected', all_exhausted: true };
+    if (!instances.length) return { success: false, error: 'All personal instances at limit/banned/disconnected', all_exhausted: true };
 
-    for (const inst of instances) {
+    const uId = String(userId);
+    if (!personalRoundRobinIndex.has(uId)) personalRoundRobinIndex.set(uId, 0);
+
+    let startIndex = personalRoundRobinIndex.get(uId);
+    let attempts = 0;
+    const total = instances.length;
+
+    while (attempts < total) {
+        let currentIndex = (startIndex + attempts) % total;
+        const inst = instances[currentIndex];
+
         const s = getSession(inst.instance_id);
-        if (!s || s.status !== 'connected') continue;
-
-        const result = await sendMsg(inst.instance_id, phone, message);
-        if (result.success) {
-            await incrementMessageCount(inst.instance_id);
-            return { success: true, instance_id: inst.instance_id, instance_db_id: inst.id, phone_number: inst.phone_number, messages_sent_today: inst.messages_sent_today + 1, daily_limit: inst.daily_message_limit, rotated: instances[0].instance_id !== inst.instance_id };
+        if (s && s.status === 'connected') {
+            const result = await sendMsg(inst.instance_id, phone, message);
+            if (result.success) {
+                await incrementMessageCount(inst.instance_id);
+                // Move tracker forward for NEXT request
+                personalRoundRobinIndex.set(uId, (currentIndex + 1) % total);
+                return {
+                    success: true,
+                    instance_id: inst.instance_id,
+                    instance_db_id: inst.id,
+                    phone_number: inst.phone_number,
+                    messages_sent_today: inst.messages_sent_today + 1,
+                    daily_limit: inst.daily_message_limit,
+                    rotated: total > 1
+                };
+            }
+            if (!result.banned) {
+                // Unknown error (not a ban), try next node if available
+            }
         }
-        if (result.banned) continue;
+        attempts++;
     }
-    return { success: false, error: 'All instances failed', all_exhausted: true };
+
+    // All active nodes failed
+    return { success: false, error: 'All personal instances failed during dispatch', all_exhausted: true };
 }
 
 async function sendWithSharedRotation(phone, message) {
     const instances = await getAvailableSharedInstances();
-    if (!instances.length) return { success: false, error: 'No shared instances', all_exhausted: true };
+    if (!instances.length) return { success: false, error: 'No shared instances available', all_exhausted: true };
 
-    for (const inst of instances) {
+    let attempts = 0;
+    const total = instances.length;
+
+    while (attempts < total) {
+        let currentIndex = (sharedRoundRobinIndex + attempts) % total;
+        const inst = instances[currentIndex];
+
         const s = getSession(inst.instance_id);
-        if (!s || s.status !== 'connected') continue;
-
-        const result = await sendMsg(inst.instance_id, phone, message);
-        if (result.success) {
-            await incrementMessageCount(inst.instance_id);
-            return { success: true, instance_id: inst.instance_id, instance_db_id: inst.id, phone_number: inst.phone_number };
+        if (s && s.status === 'connected') {
+            const result = await sendMsg(inst.instance_id, phone, message);
+            if (result.success) {
+                await incrementMessageCount(inst.instance_id);
+                // Move tracker forward for NEXT request
+                sharedRoundRobinIndex = (currentIndex + 1) % total;
+                return {
+                    success: true,
+                    instance_id: inst.instance_id,
+                    instance_db_id: inst.id,
+                    phone_number: inst.phone_number
+                };
+            }
+            if (!result.banned) {
+                // Unknown error, try next node
+            }
         }
-        if (result.banned) continue;
+        attempts++;
     }
-    return { success: false, error: 'All shared instances failed', all_exhausted: true };
+
+    return { success: false, error: 'All shared instances failed during dispatch', all_exhausted: true };
 }
 
 // ═══════════════════════════════════════════════
