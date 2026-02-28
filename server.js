@@ -237,41 +237,48 @@ async function startSession(instanceId) {
         socket.ev.on('creds.update', saveCreds);
 
         socket.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
+            try {
+                const { connection, lastDisconnect, qr } = update;
 
-            if (qr) {
-                session.qr = qr;
-                session.status = 'qr_ready';
-                console.log(`[${instanceId}] QR code generated, waiting for scan...`);
-            }
-
-            if (connection === 'open') {
-                session.status = 'connected';
-                session.qr = null;
-                const phone = socket.user?.id?.split(':')[0] || socket.user?.id?.split('@')[0] || null;
-                session.phoneNumber = phone;
-                await updateInstanceStatus(instanceId, 'connected', phone);
-                console.log(`[${instanceId}] Connected! Phone: ${phone}`);
-            }
-
-            if (connection === 'close') {
-                const code = lastDisconnect?.error?.output?.statusCode;
-                console.log(`[${instanceId}] Disconnected: ${code}`);
-
-                if ([401, 403, 515].includes(code)) {
-                    session.status = 'banned';
-                    await markBanned(instanceId);
-                    sessions.delete(instanceId);
-                    return;
+                if (qr) {
+                    session.qr = qr;
+                    session.status = 'qr_ready';
+                    console.log(`[${instanceId}] QR code generated, waiting for scan...`);
                 }
-                if (code === DisconnectReason.loggedOut) {
-                    session.status = 'disconnected';
-                    await updateInstanceStatus(instanceId, 'disconnected');
-                    sessions.delete(instanceId);
-                    return;
+
+                if (connection === 'open') {
+                    session.status = 'connected';
+                    session.qr = null;
+                    const phone = socket.user?.id?.split(':')[0] || socket.user?.id?.split('@')[0] || null;
+                    session.phoneNumber = phone;
+                    await updateInstanceStatus(instanceId, 'connected', phone);
+                    console.log(`[${instanceId}] Connected! Phone: ${phone}`);
                 }
+
+                if (connection === 'close') {
+                    const code = lastDisconnect?.error?.output?.statusCode || 500;
+                    console.log(`[${instanceId}] Disconnected: ${code}`);
+
+                    if ([401, 403].includes(code)) {
+                        session.status = 'banned';
+                        await markBanned(instanceId);
+                        sessions.delete(instanceId);
+                        return;
+                    }
+                    if (code === DisconnectReason.loggedOut) {
+                        session.status = 'disconnected';
+                        await updateInstanceStatus(instanceId, 'disconnected');
+                        sessions.delete(instanceId);
+                        return;
+                    }
+                    // Handle 515 (Stream Errored) or 408 safely without crashing
+                    session.status = 'reconnecting';
+                    await updateInstanceStatus(instanceId, 'reconnecting');
+                    setTimeout(() => startSession(instanceId), 5000);
+                }
+            } catch (eventErr) {
+                console.error(`[${instanceId}] Internal Event Error:`, eventErr.message);
                 session.status = 'reconnecting';
-                await updateInstanceStatus(instanceId, 'reconnecting');
                 setTimeout(() => startSession(instanceId), 5000);
             }
         });
