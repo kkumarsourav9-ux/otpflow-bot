@@ -113,21 +113,31 @@ async function useDBAuthState(instanceId) {
             return data;
         },
         set: async (data) => {
-            for (const cat in data) {
-                for (const id in data[cat]) {
-                    const k = `${cat}-${id}`;
-                    if (data[cat][id]) storedKeys[k] = data[cat][id];
-                    else delete storedKeys[k];
+            try {
+                for (const cat in data) {
+                    for (const id in data[cat]) {
+                        const k = `${cat}-${id}`;
+                        if (data[cat][id]) storedKeys[k] = data[cat][id];
+                        else delete storedKeys[k];
+                    }
                 }
+                const pool = getPool();
+                await pool.execute('UPDATE whatsapp_instances SET auth_keys = ? WHERE instance_id = ?', [JSON.stringify(storedKeys, BufferJSON.replacer), instanceId]);
+            } catch (err) {
+                console.error(`[${instanceId}] Failed to save auth_keys to DB:`, err.message);
             }
-            await db.execute('UPDATE whatsapp_instances SET auth_keys = ? WHERE instance_id = ?', [JSON.stringify(storedKeys, BufferJSON.replacer), instanceId]);
         }
     };
 
     return {
         state: { creds, keys },
         saveCreds: async () => {
-            await db.execute('UPDATE whatsapp_instances SET auth_creds = ? WHERE instance_id = ?', [JSON.stringify(creds, BufferJSON.replacer), instanceId]);
+            try {
+                const pool = getPool();
+                await pool.execute('UPDATE whatsapp_instances SET auth_creds = ? WHERE instance_id = ?', [JSON.stringify(creds, BufferJSON.replacer), instanceId]);
+            } catch (err) {
+                console.error(`[${instanceId}] Failed to save auth_creds to DB:`, err.message);
+            }
         }
     };
 }
