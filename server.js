@@ -521,6 +521,213 @@ app.post('/send', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ═══════════════════════════════════════════════
+//  PUBLIC API ENDPOINT (for free hosting compatibility)
+// ═══════════════════════════════════════════════
+
+app.post('/api/send', async (req, res) => {
+    try {
+        // Extract API key from Authorization header
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ error: 'Missing or invalid Authorization header' });
+        }
+        const apiKey = authHeader.substring(7);
+
+        // Validate API key against database
+        const db = getPool();
+        const [keys] = await db.execute(
+            'SELECT id, user_id, is_active FROM api_keys WHERE api_key = ? AND is_active = 1 LIMIT 1',
+            [apiKey]
+        );
+
+        if (!keys.length) {
+            return res.status(401).json({ error: 'Invalid or revoked API Key' });
+        }
+
+        const keyData = keys[0];
+        const user_id = keyData.user_id;
+
+        // Get phone and message from request
+        const { phone, message: msgBody } = req.body;
+        if (!phone || !msgBody) {
+            return res.status(400).json({ error: 'phone and message are required' });
+        }
+
+        // Get user data for routing decisions
+        const [users] = await db.execute(
+            `SELECT u.wallet_balance, u.default_prefix, p.daily_otp_limit, s.status as sub_status
+             FROM users u
+             LEFT JOIN subscriptions s ON u.id = s.user_id AND s.status = 'active'
+             LEFT JOIN plans p ON s.plan_id = p.id
+             WHERE u.id = ?`,
+            [user_id]
+        );
+
+        if (!users.length) {
+            return res.status(500).json({ error: 'User not found' });
+        }
+
+        const user = users[0];
+
+        // Get per OTP price
+        const [settings] = await db.execute("SELECT setting_value FROM settings WHERE setting_key = 'per_otp_price'");
+        const perOtpPrice = parseFloat(settings[0]?.setting_value || 0.50);
+
+        // Check daily usage
+        const todayStart = new Date().toISOString().slice(0, 10) + ' 00:00:00';
+        const [usage] = await db.execute(
+            'SELECT COUNT(*) as count FROM otp_logs WHERE user_id = ? AND created_at >= ?',
+            [user_id, todayStart]
+        );
+        const usageToday = usage[0].count;
+
+        // Determine routing type
+        const hasSubscription = user.sub_status === 'active' && usageToday < user.daily_otp_limit;
+        let routingType = null;
+
+        // Check for personal instance first
+        if (hasSubscription) {
+            const [personalCount] = await db.execute(
+                "SELECT COUNT(*) FROM whatsapp_instances WHERE user_id = ? AND status = 'connected' AND is_banned = 0",
+                [user_id]
+            );
+            if (personalCount[0]['COUNT(*)'] > 0) {
+                routingType = 'personal';
+            }
+        }
+
+        // Fallback to wallet/shared routing
+        if (!routingType) {
+            if (user.wallet_balance >= perOtpPrice) {
+                const [sharedCount] = await db.execute(
+                    "SELECT COUNT(*) FROM whatsapp_instances WHERE is_company_shared = 1 AND status = 'connected' AND is_banned = 0"
+                );
+                if (sharedCount[0]['COUNT(*)'] > 0) {
+                    routingType = 'wallet';
+                    // Deduct balance
+                    await db.execute('UPDATE users SET wallet_balance = wallet_balance - ? WHERE id = ?', [perOtpPrice, user_id]);
+                } else {
+                    return res.status(503).json({ error: 'Company routing is currently unavailable (no active shared numbers)' });
+                }
+            } else {
+                return res.status(402).json({ error: 'Insufficient Limits/Funds. Please top-up your wallet or link a personal WhatsApp device on an active subscription.' });
+            }
+        }
+
+        // Send the message
+        let result;
+        if (routingType === 'wallet') {
+            result = await sendWithSharedRotation(phone, msgBody);
+        } else {
+            result = await sendWithRotation(user_id, phone, msgBody);
+        }
+
+        if (!result.success) {
+            // Refund wallet if failed
+            if (routingType === 'wallet') {
+                await db.execute('UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?', [perOtpPrice, user_id]);
+            }
+            return res.status(result.all_exhausted ? 503 : 500).json({ error: result.error || 'Failed to send message' });
+        }
+
+        // Generate and log OTP
+        const rawOtp = String(Math.floor(100000 + Math.random() * 900000));
+        const hashedOtp = require('crypto').createHash('sha256').update(rawOtp).digest('hex');
+        const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString().slice(0, 19).replace(' ', ' ');
+
+        await db.execute(
+            'INSERT INTO otp_logs (user_id, api_key_id, phone_number, hashed_otp, expires_at) VALUES (?, ?, ?, ?, ?)',
+            [user_id, keyData.id, phone, hashedOtp, expiresAt]
+        );
+
+        // Update last used
+        await db.execute('UPDATE api_keys SET last_used_at = NOW() WHERE id = ?', [keyData.id]);
+
+        res.json({
+            success: true,
+            message: 'OTP Dispatched via WhatsApp',
+            log_id: result.log_id,
+            expires_in: 300,
+            instance_used: result.phone_number,
+            rotated: result.rotated || false
+        });
+
+    } catch (err) {
+        console.error('[api/send] Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ═══════════════════════════════════════════════
+//  PUBLIC API VERIFY ENDPOINT
+// ═══════════════════════════════════════════════
+
+app.post('/api/verify', async (req, res) => {
+    try {
+        // Extract API key from Authorization header
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ error: 'Missing or invalid Authorization header' });
+        }
+        const apiKey = authHeader.substring(7);
+
+        // Validate API key against database
+        const db = getPool();
+        const [keys] = await db.execute(
+            'SELECT id, user_id, is_active FROM api_keys WHERE api_key = ? AND is_active = 1 LIMIT 1',
+            [apiKey]
+        );
+
+        if (!keys.length) {
+            return res.status(401).json({ error: 'Invalid or revoked API Key' });
+        }
+
+        const keyData = keys[0];
+        const user_id = keyData.user_id;
+
+        // Get phone and code from request
+        const { phone, code } = req.body;
+        if (!phone || !code) {
+            return res.status(400).json({ error: 'phone and code are required' });
+        }
+
+        // Clean phone number
+        const cleanPhone = phone.replace(/[^0-9]/g, '');
+
+        // Find the most recent valid OTP for this phone
+        const [logs] = await db.execute(
+            `SELECT id, hashed_otp, expires_at FROM otp_logs
+             WHERE user_id = ? AND phone_number LIKE ? AND expires_at > NOW()
+             ORDER BY created_at DESC LIMIT 1`,
+            [user_id, `%${cleanPhone}%`]
+        );
+
+        if (!logs.length) {
+            return res.status(400).json({ valid: false, error: 'No valid OTP found for this phone number' });
+        }
+
+        const otpRecord = logs[0];
+        const hashedInput = require('crypto').createHash('sha256').update(code).digest('hex');
+
+        if (hashedInput !== otpRecord.hashed_otp) {
+            return res.status(400).json({ valid: false, error: 'Invalid OTP code' });
+        }
+
+        // Mark OTP as used
+        await db.execute('UPDATE otp_logs SET verified_at = NOW() WHERE id = ?', [otpRecord.id]);
+
+        res.json({
+            valid: true,
+            message: 'OTP verified successfully'
+        });
+
+    } catch (err) {
+        console.error('[api/verify] Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.post('/disconnect/:instanceId', async (req, res) => {
     try { await disconnectSession(req.params.instanceId); res.json({ success: true }); }
     catch (err) { res.status(500).json({ error: err.message }); }
