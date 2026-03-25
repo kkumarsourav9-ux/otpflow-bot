@@ -28,6 +28,9 @@ let makeWASocket, DisconnectReason, fetchLatestBaileysVersion, initAuthCreds, Bu
 // Cache Baileys version so we don't fetch it on every reconnect (external network call)
 let cachedBaileysVersion = null;
 
+// Unique ID for this pod/process — used as a DB lock owner
+const POD_ID = process.env.RENDER_INSTANCE_ID || require('os').hostname();
+
 // Active sessions: instanceId -> { socket, qr, status, phoneNumber }
 const sessions = new Map();
 
@@ -157,6 +160,39 @@ async function updateInstanceStatus(instanceId, status, phoneNumber = null) {
     await db.execute(`UPDATE whatsapp_instances SET ${fields.join(', ')} WHERE instance_id = ?`, values);
 }
 
+// DB-level pod lock — prevents two Render pods from starting the same session simultaneously.
+// Returns true if THIS pod successfully claimed the session, false if another pod owns it.
+async function tryClaimSession(instanceId) {
+    const db = getPool();
+    const lockExpiry = 45; // seconds — if a pod crashes mid-start, lock auto-expires
+    try {
+        // Atomically claim the session only if: no owner set, or owner's lock has expired
+        const [result] = await db.execute(
+            `UPDATE whatsapp_instances
+             SET pod_owner = ?, pod_claimed_at = NOW()
+             WHERE instance_id = ?
+               AND (pod_owner IS NULL
+                    OR pod_owner = ?
+                    OR pod_claimed_at < DATE_SUB(NOW(), INTERVAL ? SECOND))`,
+            [POD_ID, instanceId, POD_ID, lockExpiry]
+        );
+        return result.affectedRows > 0; // true = we own it
+    } catch (e) {
+        // If pod_owner column doesn't exist yet, just allow (old schema)
+        return true;
+    }
+}
+
+async function releaseSessionClaim(instanceId) {
+    const db = getPool();
+    try {
+        await db.execute(
+            `UPDATE whatsapp_instances SET pod_owner = NULL, pod_claimed_at = NULL WHERE instance_id = ? AND pod_owner = ?`,
+            [instanceId, POD_ID]
+        );
+    } catch (e) { /* ignore if column missing */ }
+}
+
 async function markBanned(instanceId) {
     const db = getPool();
     await db.execute('UPDATE whatsapp_instances SET is_banned = 1, status = ? WHERE instance_id = ?', ['banned', instanceId]);
@@ -225,6 +261,13 @@ async function startSession(instanceId) {
             try { existing.socket?.end(); } catch (e) { }
             sessions.delete(instanceId);
         }
+    }
+
+    // Acquire DB lock — stop two pods from starting the same session simultaneously
+    const claimed = await tryClaimSession(instanceId);
+    if (!claimed) {
+        console.log(`[${instanceId}] Another pod already owns this session — skipping start on this pod (${POD_ID})`);
+        return null;
     }
 
     const session = {
@@ -311,23 +354,41 @@ async function startSession(instanceId) {
                         console.log(`[${instanceId}] QR was not scanned (code ${code}). Stopping auto-retry. Request a new QR from the dashboard.`);
                         session.status = 'disconnected';
                         await updateInstanceStatus(instanceId, 'disconnected');
+                        await releaseSessionClaim(instanceId);
                         sessions.delete(instanceId);
                         return;
                     }
 
-                    // Was connected before — safe to auto-reconnect
+                    // 440 = conflict/replaced — another pod or device took over this session.
+                    // Release our lock and wait longer before retrying so the other side wins cleanly.
+                    if (code === 440) {
+                        console.log(`[${instanceId}] Session replaced by another connection (code 440). Releasing lock and waiting 30s before retry...`);
+                        session.status = 'reconnecting';
+                        await updateInstanceStatus(instanceId, 'reconnecting');
+                        await releaseSessionClaim(instanceId);
+                        sessions.delete(instanceId);
+                        setTimeout(() => startSession(instanceId), 30000); // 30s backoff
+                        return;
+                    }
+
+                    // Normal disconnect — was connected before, safe to auto-reconnect
                     session.status = 'reconnecting';
                     await updateInstanceStatus(instanceId, 'reconnecting');
+                    await releaseSessionClaim(instanceId);
+                    sessions.delete(instanceId);
                     setTimeout(() => startSession(instanceId), 5000);
                 }
             } catch (eventErr) {
                 console.error(`[${instanceId}] Internal Event Error:`, eventErr.message);
                 if (session.everConnected) {
                     session.status = 'reconnecting';
+                    await releaseSessionClaim(instanceId);
+                    sessions.delete(instanceId);
                     setTimeout(() => startSession(instanceId), 5000);
                 } else {
                     session.status = 'disconnected';
                     try { await updateInstanceStatus(instanceId, 'disconnected'); } catch (e) {}
+                    await releaseSessionClaim(instanceId);
                     sessions.delete(instanceId);
                 }
             }
