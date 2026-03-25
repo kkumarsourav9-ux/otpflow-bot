@@ -25,6 +25,9 @@ const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
 // Will hold Baileys exports after dynamic import
 let makeWASocket, DisconnectReason, fetchLatestBaileysVersion, initAuthCreds, BufferJSON;
 
+// Cache Baileys version so we don't fetch it on every reconnect (external network call)
+let cachedBaileysVersion = null;
+
 // Active sessions: instanceId -> { socket, qr, status, phoneNumber }
 const sessions = new Map();
 
@@ -237,18 +240,26 @@ async function startSession(instanceId) {
 
     try {
         const { state, saveCreds } = await useDBAuthState(instanceId);
-        const { version } = await fetchLatestBaileysVersion();
+        // Use cached version to avoid a network round-trip on every reconnect
+        if (!cachedBaileysVersion) {
+            const result = await fetchLatestBaileysVersion();
+            cachedBaileysVersion = result.version;
+        }
+        const version = cachedBaileysVersion;
         console.log(`[${instanceId}] Starting session with Baileys v${version.join('.')}...`);
 
         const socket = makeWASocket({
             version,
             auth: state,
             logger,
-            printQRInTerminal: false,   // deprecated option removed
+            printQRInTerminal: false,
             browser: ['OTPFlow', 'Chrome', '120.0'],
             connectTimeoutMs: 60000,
+            keepAliveIntervalMs: 30000,     // ping WhatsApp every 30s — prevents silent disconnect
             markOnlineOnConnect: false,
-            generateHighQualityLinkPreview: false
+            generateHighQualityLinkPreview: false,
+            syncFullHistory: false,          // faster reconnect, skip history sync
+            retryRequestDelayMs: 2000,       // wait 2s between retry attempts
         });
 
         session.socket = socket;
@@ -866,6 +877,20 @@ async function main() {
         console.log(`\n🟢 OTPFlow WhatsApp Service running on port ${PORT}`);
         console.log(`   Endpoints: /init, /send, /qr, /status, /instances\n`);
     });
+
+    // Self-ping every 14 minutes to prevent Render free tier from sleeping.
+    // Render spins down services after 15 min of no inbound HTTP requests.
+    const selfUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+    setInterval(async () => {
+        try {
+            const http = require('http');
+            const https = require('https');
+            const lib = selfUrl.startsWith('https') ? https : http;
+            lib.get(`${selfUrl}/status`, (res) => {
+                // silent — just keeping the process alive
+            }).on('error', () => {});
+        } catch (e) {}
+    }, 14 * 60 * 1000); // every 14 minutes
 }
 
 main().catch(err => {
